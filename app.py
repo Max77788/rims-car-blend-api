@@ -12,6 +12,9 @@ from google.cloud import vision
 from google.oauth2 import service_account
 import base64
 
+# Load environment variables from .env file
+load_dotenv(find_dotenv())
+
 if "GOOGLE_CREDENTIALS_BASE64" in os.environ:
     credentials_base64 = os.environ["GOOGLE_CREDENTIALS_BASE64"]
     credentials_json = base64.b64decode(credentials_base64).decode('utf-8')
@@ -20,9 +23,6 @@ if "GOOGLE_CREDENTIALS_BASE64" in os.environ:
     client = vision.ImageAnnotatorClient(credentials=credentials)
 else:
     client = vision.ImageAnnotatorClient()
-
-# Load environment variables from .env file
-load_dotenv(find_dotenv())
 
 app = Flask(__name__)
 
