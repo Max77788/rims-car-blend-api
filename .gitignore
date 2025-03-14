@@ -1,0 +1,7 @@
+venv
+.env
+activate_venv.txt
+car-wheels-project-key.json
+.vercel
+wheel_no_bg.png
+result.jpg
