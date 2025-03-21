@@ -53,7 +53,7 @@ def remove_bg_from_image(image_bytes):
 # -----------------------------------------
 # Helper: Add black circle background to an image with transparency
 # -----------------------------------------
-def add_black_circle_background(image, expand_ratio=0.1):  # Increased expand ratio for larger wheel
+def add_black_circle_background(image, expand_ratio=0.1):
     """
     Adds a black circular background behind the wheel in an image without truncating the full image.
     
@@ -74,6 +74,9 @@ def add_black_circle_background(image, expand_ratio=0.1):  # Increased expand ra
     # Get actual bounding coordinates from numpy array
     rows = np.any(non_transparent, axis=1)
     cols = np.any(non_transparent, axis=0)
+    if not np.any(rows) or not np.any(cols):
+        return image
+        
     top, bottom = np.where(rows)[0][[0, -1]]
     left, right = np.where(cols)[0][[0, -1]]
     
@@ -154,7 +157,7 @@ def get_wheel_angle(polygon, width, height):
 # -----------------------------------------
 # Helper: Add enhanced drop shadow to an image for a more realistic look
 # -----------------------------------------
-def add_drop_shadow(image, offset=(7, 7), blur_radius=15, shadow_color=(0, 0, 0, 130)):  # Enhanced shadow for larger wheels
+def add_drop_shadow(image, offset=(7, 7), blur_radius=15, shadow_color=(0, 0, 0, 130)):
     """
     Creates a more realistic drop shadow with customizable opacity and blur.
     """
@@ -270,6 +273,91 @@ def is_front_wheel(polygon, width, height, all_wheels):
     return wheel_center_x_normalized < min(other_centers)
 
 # -----------------------------------------
+# Helper: Find coefficients for perspective transformation
+# -----------------------------------------
+def find_coeffs(pa, pb):
+    """
+    Calculate coefficients for perspective transformation.
+    Source: https://stackoverflow.com/questions/14177744/
+    """
+    matrix = []
+    for p1, p2 in zip(pa, pb):
+        matrix.append([p1[0], p1[1], 1, 0, 0, 0, -p2[0]*p1[0], -p2[0]*p1[1]])
+        matrix.append([0, 0, 0, p1[0], p1[1], 1, -p2[1]*p1[0], -p2[1]*p1[1]])
+
+    A = np.matrix(matrix, dtype=float)
+    B = np.array(pb).reshape(8)
+
+    res = np.dot(np.linalg.inv(A.T * A) * A.T, B)
+    return np.array(res).reshape(8)
+
+# -----------------------------------------
+# Helper: Determine if car is in side view or angled view
+# -----------------------------------------
+def determine_car_view(objects, width, height):
+    """
+    Analyze the detected objects to determine if the car is in side view or angled view.
+    Returns True for angled view, False for side view.
+    """
+    if not objects:
+        return False  # Default to side view processing if no objects detected
+    
+    # Count wheels and check their positions
+    wheel_polygons = []
+    for obj in objects:
+        name = obj.name.lower()
+        if 'wheel' in name or 'tire' in name:
+            polygon = []
+            for vertex in obj.bounding_poly.normalized_vertices:
+                polygon.append((vertex.x, vertex.y))
+            wheel_polygons.append(polygon)
+    
+    if len(wheel_polygons) < 2:
+        return False  # Not enough wheels to determine, default to side view
+    
+    # Get wheel centers
+    wheel_centers = []
+    for poly in wheel_polygons:
+        center_x, center_y = get_wheel_center(poly, width, height)
+        wheel_centers.append((center_x, center_y))
+    
+    # Calculate distances between wheel centers
+    distances = []
+    for i in range(len(wheel_centers)):
+        for j in range(i+1, len(wheel_centers)):
+            dist_x = wheel_centers[i][0] - wheel_centers[j][0]
+            dist_y = wheel_centers[i][1] - wheel_centers[j][1]
+            distance = math.sqrt(dist_x**2 + dist_y**2)
+            distances.append(distance / width)  # Normalize by image width
+    
+    # Check if car is detected
+    car_detected = False
+    for obj in objects:
+        if obj.name.lower() == 'car' or obj.name.lower() == 'vehicle':
+            car_detected = True
+            break
+    
+    # Analyze wheel positions and car detection
+    if len(wheel_centers) >= 2:
+        # Calculate the angle between the line connecting the two furthest wheels and the horizontal
+        wheel_centers.sort(key=lambda c: c[0])  # Sort by x-coordinate
+        leftmost = wheel_centers[0]
+        rightmost = wheel_centers[-1]
+        
+        if abs(leftmost[0] - rightmost[0]) < 0.1 * width:
+            # Wheels are vertically aligned (rare for car photos)
+            return False
+        
+        angle = math.degrees(math.atan2(rightmost[1] - leftmost[1], rightmost[0] - leftmost[0]))
+        
+        # If the angle is small, it's likely a side view
+        # If the angle is significant, it's likely an angled view
+        return abs(angle) > 10
+    
+    # Default to side view if we can't determine
+    return False
+
+# -----------------------------------------
 # Helper: Process images (car and wheel) and paste new wheels
 # -----------------------------------------
 def process_image_from_images(car_img, wheel_img, skip_wheels_amount_validation=False):
@@ -296,6 +384,10 @@ def process_image_from_images(car_img, wheel_img, skip_wheels_amount_validation=
     response = client.annotate_image(request=request)
     objects = response.localized_object_annotations
 
+    # Determine if the car is in side view or angled view
+    is_angled_view = determine_car_view(objects, width, height)
+    print(f"Detected car view: {'Angled (3/4) view' if is_angled_view else 'Side view'}")
+    
     # Save a debug image to visualize detections
     debug_img = original.copy()
     debug_draw = ImageDraw.Draw(debug_img)
@@ -352,11 +444,11 @@ def process_image_from_images(car_img, wheel_img, skip_wheels_amount_validation=
             print(f"OpenCV fallback also failed: {str(e)}")
             raise Exception("No wheel/tire objects detected.")
 
-    # Filter for valid (square-like) wheels using an aspect ratio check.
+    # Filter for valid wheels based on aspect ratio
     valid_polygons = []
     # Using larger wheels by reducing the shrink factor and maintaining the aspect ratio
-    shrink_factor = 0.90  # Changed from 0.97 to 0.90 for larger wheels
-    narrow_factor = 1.0   # Changed from 0.98 to 1.0 to maintain full width
+    shrink_factor = 0.90 if is_angled_view else 0.92  # Adjusted based on view
+    narrow_factor = 1.0 if is_angled_view else 0.98   # Adjusted based on view
 
     for poly in bounding_polygons:
         xs = [p[0] for p in poly]
@@ -373,14 +465,21 @@ def process_image_from_images(car_img, wheel_img, skip_wheels_amount_validation=
 
         aspect_ratio = box_height / box_width if box_width else 0
         
-        # More permissive aspect ratio check for wheel detection
-        if aspect_ratio < 0.7 or aspect_ratio > 2.0:
-            print(f"Skipping bounding box due to aspect ratio (height/width): {aspect_ratio:.2f}")
-            continue
+        # Aspect ratio check based on view type
+        if is_angled_view:
+            # More permissive for angled view
+            if aspect_ratio < 0.7 or aspect_ratio > 2.0:
+                print(f"Skipping bounding box due to aspect ratio (height/width): {aspect_ratio:.2f}")
+                continue
+        else:
+            # Stricter for side view
+            if aspect_ratio < 0.8 or aspect_ratio > 1.3:
+                print(f"Skipping bounding box due to aspect ratio (height/width): {aspect_ratio:.2f}")
+                continue
 
         valid_polygons.append((poly, left, upper, right, lower, box_width, box_height))
 
-    # Deduplicate valid detections based on bounding box overlap (IoU).
+    # Deduplicate valid detections based on bounding box overlap (IoU)
     unique_valid = []
     iou_threshold = 0.5
     for item in valid_polygons:
@@ -396,20 +495,21 @@ def process_image_from_images(car_img, wheel_img, skip_wheels_amount_validation=
             unique_valid.append(item)
     
     print("Unique valid wheels detected:", len(unique_valid))
-    # If only one unique valid wheel eligible for replacement is detected, return the message.
+    # If only one unique valid wheel eligible for replacement is detected, return the message
     if len(unique_valid) == 1 and not skip_wheels_amount_validation:
         return "only one valid wheel eligible for replacement"
 
-    # Otherwise, process and paste each unique valid wheel.
+    # Otherwise, process and paste each unique valid wheel
     all_polygons = [item[0] for item in unique_valid]
     
     for (poly, left, upper, right, lower, box_width, box_height) in unique_valid:
         # Make wheels larger by adjusting the scale factor
-        wheel_scale_factor = 1.15  # New scale factor to make wheels 15% larger
+        wheel_scale_factor = 1.15 if is_angled_view else 1.10  # Adjusted based on view
         
         # Adjust shrink factors based on whether it's a front or rear wheel
         # Front wheels often appear larger in perspective
         is_front = is_front_wheel(poly, width, height, all_polygons)
+        
         if is_front:
             shrink_factor = 0.90  # Changed from 0.95 to 0.90 for larger front wheels
             shadow_offset = (8, 8)  # Enhanced shadow for larger wheels
@@ -447,24 +547,27 @@ def process_image_from_images(car_img, wheel_img, skip_wheels_amount_validation=
                 perspective_factor = -0.05
                 
             # Create perspective transformation matrix
-            width, height = resized_wheel.size
+            width_wheel, height_wheel = resized_wheel.size
             # Define corners
-            corners = [(0, 0), (width, 0), (width, height), (0, height)]
+            corners = [(0, 0), (width_wheel, 0), (width_wheel, height_wheel), (0, height_wheel)]
             # Define new corners with perspective
             new_corners = [
                 (0, 0),
-                (width, int(height * perspective_factor)),
-                (width, height - int(height * perspective_factor)),
-                (0, height)
+                (width_wheel, int(height_wheel * perspective_factor)),
+                (width_wheel, height_wheel - int(height_wheel * perspective_factor)),
+                (0, height_wheel)
             ]
             # Apply perspective transformation
-            coefficient = find_coeffs(new_corners, corners)
-            resized_wheel = resized_wheel.transform(
-                (width, height), 
-                Image.PERSPECTIVE, 
-                coefficient, 
-                Image.BICUBIC
-            )
+            try:
+                coefficient = find_coeffs(new_corners, corners)
+                resized_wheel = resized_wheel.transform(
+                    (width_wheel, height_wheel), 
+                    Image.PERSPECTIVE, 
+                    coefficient, 
+                    Image.BICUBIC
+                )
+            except Exception as e:
+                print(f"Perspective transform failed: {str(e)}. Using original wheel.")
         
         rotated_wheel = resized_wheel.rotate(angle, resample=Image.BICUBIC, expand=True)
         
@@ -488,19 +591,29 @@ def process_image_from_images(car_img, wheel_img, skip_wheels_amount_validation=
         vertical_position = center_y / height
         vertical_offset = int(box_height * 0.05 * (vertical_position - 0.5))
         
-        paste_x = center_x - shadowed_wheel.width // 2
+        # For angled view, add a left offset for better positioning
+        left_offset = 0
+        if is_angled_view:
+            left_offset = 15 if is_front else 10
+        
+        paste_x = center_x - shadowed_wheel.width // 2 - left_offset
         paste_y = center_y - shadowed_wheel.height // 2 + vertical_offset
 
         # Create a mask for blending with the original image
-        mask = Image.new('L', shadowed_wheel.size, 0)
-        mask_draw = ImageDraw.Draw(mask)
-        mask_draw.ellipse(
-            (0, 0, shadowed_wheel.width, shadowed_wheel.height),
-            fill=255
-        )
-        mask = mask.filter(ImageFilter.GaussianBlur(5))  # Blur the edges for softer blend
-        
-        original.paste(shadowed_wheel, (paste_x, paste_y), shadowed_wheel)
+        if is_angled_view:
+            # For angled view, use the alpha channel as mask
+            original.paste(shadowed_wheel, (paste_x, paste_y), shadowed_wheel)
+        else:
+            # For side view, create a soft elliptical mask for better blending
+            mask = Image.new('L', shadowed_wheel.size, 0)
+            mask_draw = ImageDraw.Draw(mask)
+            mask_draw.ellipse(
+                (0, 0, shadowed_wheel.width, shadowed_wheel.height),
+                fill=255
+            )
+            mask = mask.filter(ImageFilter.GaussianBlur(5))  # Blur the edges for softer blend
+            
+            original.paste(shadowed_wheel, (paste_x, paste_y), shadowed_wheel)
 
     # Enhance the final result
     result = original.convert("RGB")
@@ -508,25 +621,6 @@ def process_image_from_images(car_img, wheel_img, skip_wheels_amount_validation=
     result = enhancer.enhance(1.05)  # Slightly increase contrast for better integration
     
     return result
-
-# -----------------------------------------
-# Helper: Find coefficients for perspective transformation
-# -----------------------------------------
-def find_coeffs(pa, pb):
-    """
-    Calculate coefficients for perspective transformation.
-    Source: https://stackoverflow.com/questions/14177744/
-    """
-    matrix = []
-    for p1, p2 in zip(pa, pb):
-        matrix.append([p1[0], p1[1], 1, 0, 0, 0, -p2[0]*p1[0], -p2[0]*p1[1]])
-        matrix.append([0, 0, 0, p1[0], p1[1], 1, -p2[1]*p1[0], -p2[1]*p1[1]])
-
-    A = np.matrix(matrix, dtype=float)
-    B = np.array(pb).reshape(8)
-
-    res = np.dot(np.linalg.inv(A.T * A) * A.T, B)
-    return np.array(res).reshape(8)
 
 # -----------------------------------------
 # Flask Route: Process images from URLs
@@ -563,7 +657,7 @@ def process_route():
                 # If fallback fails, use original image
                 wheel_img = Image.open(io.BytesIO(wheel_resp.content))
         
-        wheel_img = add_black_circle_background(wheel_img, expand_ratio=0.1)  # Increased from 0.05 to 0.1
+        wheel_img = add_black_circle_background(wheel_img, expand_ratio=0.1)
         result = process_image_from_images(car_img, wheel_img, skip_wheels_amount_validation)
 
         if isinstance(result, str):
