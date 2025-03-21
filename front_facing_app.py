@@ -5,7 +5,7 @@ import json
 import numpy as np
 import cv2
 import requests
-from PIL import Image, ImageDraw, ImageFilter, ImageEnhance
+from PIL import Image, ImageDraw, ImageFilter, ImageEnhance, ImageStat
 from flask import Flask, request, send_file, jsonify
 from dotenv import load_dotenv, find_dotenv
 from google.cloud import vision
@@ -586,6 +586,4 @@ def index():
     return "Welcome! Use the POST /process endpoint with JSON payload containing 'car_url' and 'wheel_url'."
 
 if __name__ == "__main__":
-    # Import ImageStat inside main block to avoid circular imports
-    from PIL import ImageStat
     app.run(debug=True)

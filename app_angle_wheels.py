@@ -5,7 +5,7 @@ import json
 import numpy as np
 import cv2
 import requests
-from PIL import Image, ImageDraw, ImageFilter
+from PIL import Image, ImageDraw, ImageFilter, ImageStat
 from flask import Flask, request, send_file, jsonify
 from dotenv import load_dotenv, find_dotenv
 from google.cloud import vision
